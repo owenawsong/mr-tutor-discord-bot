@@ -1,5 +1,6 @@
 import discord
-from discord.ext import commands, app_commands
+from discord.ext import commands
+from discord import app_commands
 from discord.ui import Button, View
 import openai
 import os
@@ -10,11 +11,17 @@ import json
 from datetime import datetime, timedelta
 import asyncio
 
-# --- Configuration and Setup ---
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
+intents.members = True
+
+# Use commands.Bot instead of Client for slash command support
+bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
 
 POE_API_KEY = os.getenv("POE_API_KEY")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-ADMIN_IDS = [int(id_str) for id_str in os.getenv("ADMIN_IDS", "").split(",") if id_str.strip()]
+ADMIN_IDS = os.getenv("ADMIN_IDS", "").split(",")
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "Admin")
 
 # Persistent storage files
@@ -22,34 +29,22 @@ RATE_LIMITS_FILE = "rate_limits.json"
 BOT_STATE_FILE = "bot_state.json"
 USER_ACCEPTANCES_FILE = "user_acceptances.json"
 
-# --- Bot Initialization ---
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-intents.members = True
-
-# Use commands.Bot instead of discord.Client
-bot = commands.Bot(command_prefix='$', intents=intents)
-
-# --- State and History ---
-
 conversation_history = defaultdict(list)
 MAX_HISTORY_LENGTH = 50
 
-# Rate limiting structure (will be loaded from file)
-rate_limits = {"global": {}, "users": {}}
+rate_limits = {
+    "global": {},
+    "users": {}
+}
 
-# Bot state (will be loaded from file)
-bot_state = {"enabled": True, "disable_until": None}
+bot_state = {
+    "enabled": True,
+    "disable_until": None
+}
 
-# User message tracking for rate limiting
-user_messages = defaultdict(lambda: defaultdict(list))  # {user_id: {command_type: [timestamps]}}
+user_messages = defaultdict(lambda: defaultdict(list))
+user_acceptances = {}
 
-# User acceptances for non-teach models
-user_acceptances = {}  # {user_id: timestamp}
-
-# --- Custom Prompt ---
 custom_prompt = """# Mr. Tutor – Core Guidelines
   
 You are in a roleplay as **"Mr. Tutor"**!
@@ -70,58 +65,79 @@ You **never reveal the final answer directly**. Instead, you guide, question, an
 1. **Never give the final answer outright.**
    - Instead, break the problem into smaller steps.
    - Offer hints, analogies, or guiding questions.
- 
+  
 2. **Encourage active participation.**
    - Ask the learner what they think the next step could be.
    - Validate their reasoning and gently correct if needed.
- 
+  
 3. **Use the Socratic method.**
    - Lead with questions that spark deeper thought.
    - Example: "What happens if we try to simplify this part first?"
- 
+  
 4. **Provide structure.**
    - Outline clear steps or strategies without completing them.
    - Example: "Step 1 is to identify the variables. Step 2 is to check the relationship. What do you notice?"
- 
+  
 5. **Adapt to the learner's level.**
    - Use simple language for beginners.
    - Add complexity for advanced learners.
- 
+  
 6. **Encourage reflection.**
    - Ask learners to explain their reasoning.
    - Reinforce understanding by connecting concepts.
- 
+  
 7. **Promote confidence.**
    - Highlight what the learner did correctly.
    - Frame mistakes as opportunities to learn.
- 
+  
 ---
- 
+  
 ## Example Behaviors
 - Don't: "The answer is 42."
 - Do: "What happens if you divide both sides by 7? What number do you get?"
- 
+  
 - Don't: "Here's the full solution."
 - Do: "Let's start with the first step. Can you identify the key variable here?"
- 
+  
 ---
- 
+  
 ## Goal
 By following these guidelines, Mr. Tutor ensures that learners:
 - Develop problem-solving skills.
 - Gain confidence in their own reasoning.
 - Learn how to learn, not just how to answer.
- 
+  
 ---
- """
+  
+"""
 
 poe_client = openai.OpenAI(
     api_key=POE_API_KEY,
     base_url="https://api.poe.com/v1",
 )
 
-# --- Persistence Functions ---
+# Command configurations - LONGER PREFIXES FIRST to avoid matching issues
+COMMAND_CONFIGS = [
+    # Longer prefixes first!
+    ("tutorplus", "Gemini-2.5-Flash-Tut", True, "plus"),
+    ("tutimage", "FLUX-schnell", False, "image"),
+    ("tutplus", "Gemini-2.5-Flash-Tut", True, "plus"),
+    ("tutminus", "Gemini-2.5-Flash-Lite", True, "minus"),
+    ("tutor", "GPT-5-mini", True, "normal"),
+    ("tut+", "Gemini-2.5-Flash-Tut", True, "plus"),
+    ("tut-", "Gemini-2.5-Flash-Lite", True, "minus"),
+    ("tut", "GPT-5-mini", True, "normal"),
+    ("ti+", "GPT-Image-1-Mini", False, "imageplus"),
+    ("ti", "FLUX-schnell", False, "image"),
+    ("t+", "Gemini-2.5-Flash-Tut", True, "plus"),
+    ("t-", "Gemini-2.5-Flash-Lite", True, "minus"),
+    ("tn+", "Gemini-2.5-Flash-Tut", False, "nonplus"),
+    ("tn-", "Gemini-2.5-Flash-Lite", False, "nonminus"),
+    ("tn", "GPT-5-mini", False, "nonnormal"),
+    ("t", "GPT-5-mini", True, "normal"),
+]
 
+# Helper functions
 def load_json(filename, default):
     try:
         with open(filename, 'r') as f:
@@ -148,15 +164,11 @@ def save_bot_state():
 def save_user_acceptances():
     save_json(USER_ACCEPTANCES_FILE, user_acceptances)
 
-# --- Utility Functions ---
-
 def is_admin(user_id, member=None):
     """Check if user is admin by ID or role"""
-    # Check user ID
-    if user_id in ADMIN_IDS:
+    if str(user_id) in ADMIN_IDS and ADMIN_IDS[0] != "":
         return True
     
-    # Check role if member object is provided
     if member and hasattr(member, 'roles'):
         for role in member.roles:
             if role.name == ADMIN_ROLE_NAME:
@@ -173,64 +185,65 @@ def check_bot_state():
             save_bot_state()
     return bot_state["enabled"]
 
-def check_rate_limit(user_id, command_type):
-    """Check if user has exceeded rate limits for a command_type"""
+def check_rate_limit(user_id, command):
+    """Check if user has exceeded rate limits for a command"""
     now = datetime.now().timestamp()
-    user_id_str = str(user_id)
     
-    # Clean old timestamps (keep last hour for all checks)
-    for uid in user_messages:
-        for cmd in user_messages[uid]:
-            user_messages[uid][cmd] = [
-                ts for ts in user_messages[uid][cmd] 
-                if now - ts < 3600
-            ]
-
-    # Check user-specific rate limits
-    if user_id_str in rate_limits["users"] and command_type in rate_limits["users"][user_id_str]:
-        limit_config = rate_limits["users"][user_id_str][command_type]
+    if user_id in user_messages and command in user_messages[user_id]:
+        user_messages[user_id][command] = [
+            ts for ts in user_messages[user_id][command] 
+            if now - ts < 3600
+        ]
+    
+    user_id_str = str(user_id)
+    if user_id_str in rate_limits["users"] and command in rate_limits["users"][user_id_str]:
+        limit_config = rate_limits["users"][user_id_str][command]
         
-        # Check if expired
         if "expires" in limit_config and limit_config["expires"] and now >= limit_config["expires"]:
-            del rate_limits["users"][user_id_str][command_type]
+            del rate_limits["users"][user_id_str][command]
             save_rate_limits()
         else:
-            timestamps = user_messages[user_id][command_type]
+            timestamps = user_messages[user_id][command]
             
-            # Check per minute
-            if "per_minute" in limit_config and len([ts for ts in timestamps if now - ts < 60]) >= limit_config["per_minute"]:
-                return False, f"You've exceeded the user rate limit (per minute) for this command type (`{command_type}`)."
+            if "per_minute" in limit_config:
+                recent_1min = [ts for ts in timestamps if now - ts < 60]
+                if len(recent_1min) >= limit_config["per_minute"]:
+                    return False, "You've exceeded the rate limit (per minute) for this command."
             
-            # Check per 10 minutes
-            if "per_10min" in limit_config and len([ts for ts in timestamps if now - ts < 600]) >= limit_config["per_10min"]:
-                return False, f"You've exceeded the user rate limit (per 10 minutes) for this command type (`{command_type}`)."
+            if "per_10min" in limit_config:
+                recent_10min = [ts for ts in timestamps if now - ts < 600]
+                if len(recent_10min) >= limit_config["per_10min"]:
+                    return False, "You've exceeded the rate limit (per 10 minutes) for this command."
             
-            # Check per hour
-            if "per_hour" in limit_config and len([ts for ts in timestamps if now - ts < 3600]) >= limit_config["per_hour"]:
-                return False, f"You've exceeded the user rate limit (per hour) for this command type (`{command_type}`)."
+            if "per_hour" in limit_config:
+                recent_hour = [ts for ts in timestamps if now - ts < 3600]
+                if len(recent_hour) >= limit_config["per_hour"]:
+                    return False, "You've exceeded the rate limit (per hour) for this command."
     
-    # Check global rate limits
-    if command_type in rate_limits["global"]:
-        limit_config = rate_limits["global"][command_type]
-        timestamps = user_messages[user_id][command_type]
+    if command in rate_limits["global"]:
+        limit_config = rate_limits["global"][command]
+        timestamps = user_messages[user_id][command]
         
-        # Check per minute
-        if "per_minute" in limit_config and len([ts for ts in timestamps if now - ts < 60]) >= limit_config["per_minute"]:
-            return False, f"Global rate limit exceeded (per minute) for this command type (`{command_type}`)."
+        if "per_minute" in limit_config:
+            recent_1min = [ts for ts in timestamps if now - ts < 60]
+            if len(recent_1min) >= limit_config["per_minute"]:
+                return False, "Global rate limit exceeded (per minute) for this command."
         
-        # Check per 10 minutes
-        if "per_10min" in limit_config and len([ts for ts in timestamps if now - ts < 600]) >= limit_config["per_10min"]:
-            return False, f"Global rate limit exceeded (per 10 minutes) for this command type (`{command_type}`)."
+        if "per_10min" in limit_config:
+            recent_10min = [ts for ts in timestamps if now - ts < 600]
+            if len(recent_10min) >= limit_config["per_10min"]:
+                return False, "Global rate limit exceeded (per 10 minutes) for this command."
         
-        # Check per hour
-        if "per_hour" in limit_config and len([ts for ts in timestamps if now - ts < 3600]) >= limit_config["per_hour"]:
-            return False, f"Global rate limit exceeded (per hour) for this command type (`{command_type}`)."
+        if "per_hour" in limit_config:
+            recent_hour = [ts for ts in timestamps if now - ts < 3600]
+            if len(recent_hour) >= limit_config["per_hour"]:
+                return False, "Global rate limit exceeded (per hour) for this command."
     
     return True, None
 
-def record_message(user_id, command_type):
+def record_message(user_id, command):
     """Record a message for rate limiting"""
-    user_messages[user_id][command_type].append(datetime.now().timestamp())
+    user_messages[user_id][command].append(datetime.now().timestamp())
 
 def needs_acceptance(user_id):
     """Check if user needs to accept terms for non-teach models"""
@@ -238,14 +251,41 @@ def needs_acceptance(user_id):
     if user_id_str not in user_acceptances:
         return True
     
-    # Check if acceptance is older than 30 days
     last_acceptance = datetime.fromtimestamp(user_acceptances[user_id_str])
     if datetime.now() - last_acceptance > timedelta(days=30):
         return True
     
     return False
 
-# --- Attachment Handling ---
+class AcceptanceView(View):
+    def __init__(self, user_id, callback):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.callback = callback
+        self.accepted = False
+    
+    @discord.ui.button(label="Accept & Continue", style=discord.ButtonStyle.green)
+    async def accept_button(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This prompt is not for you!", ephemeral=True)
+            return
+        
+        user_acceptances[str(self.user_id)] = datetime.now().timestamp()
+        save_user_acceptances()
+        self.accepted = True
+        
+        await interaction.response.send_message("✅ Terms accepted! Processing your request...", ephemeral=True)
+        await self.callback()
+        self.stop()
+    
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
+    async def cancel_button(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This prompt is not for you!", ephemeral=True)
+            return
+        
+        await interaction.response.send_message("Request cancelled.", ephemeral=True)
+        self.stop()
 
 async def download_attachment(attachment):
     try:
@@ -301,18 +341,13 @@ async def process_attachments(attachments):
             })
     return attachment_contents
 
-# --- Poe API Interaction ---
-
 def query_poe(user_id, user_prompt, attachment_contents=None, model="GPT-5-mini", use_tutor_prompt=True):
     try:
-        # Prepare content for history and API call
         if attachment_contents:
-            # For multi-modal input, the prompt must be a list of content blocks
             message_content = [{"type": "text", "text": user_prompt}]
             message_content.extend(attachment_contents)
         else:
-            # For text-only, the prompt can be a string or a list with one text block
-            message_content = user_prompt if not attachment_contents else [{"type": "text", "text": user_prompt}]
+            message_content = user_prompt
         
         conversation_history[user_id].append({
             "role": "user",
@@ -327,6 +362,8 @@ def query_poe(user_id, user_prompt, attachment_contents=None, model="GPT-5-mini"
             messages.append({"role": "system", "content": custom_prompt})
         messages.extend(conversation_history[user_id])
 
+        print(f"[DEBUG] Querying Poe with model: {model}, use_tutor: {use_tutor_prompt}")
+
         chat = poe_client.chat.completions.create(
             model=model,
             messages=messages,
@@ -338,14 +375,21 @@ def query_poe(user_id, user_prompt, attachment_contents=None, model="GPT-5-mini"
             "content": response_content
         })
         return response_content
+    except openai.APIError as e:
+        return f"API Error: {e}"
+    except openai.APIConnectionError as e:
+        return f"Connection Error: Failed to connect to Poe API - {e}"
+    except openai.RateLimitError as e:
+        return f"Rate Limit Error: {e}"
+    except openai.AuthenticationError as e:
+        return f"Authentication Error: Invalid API key - {e}"
     except Exception as e:
-        # Catch all API errors and return a user-friendly message
-        return f"API/Model Error (`{model}`): {type(e).__name__} - {e}"
+        return f"Unexpected error: {e}"
 
 async def generate_image(prompt, model="FLUX-schnell"):
     """Generate image using Poe API"""
     try:
-        # Image generation typically doesn't use a system prompt
+        print(f"[DEBUG] Generating image with model: {model}")
         chat = poe_client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
@@ -355,29 +399,20 @@ async def generate_image(prompt, model="FLUX-schnell"):
         response = chat.choices[0].message
         return response
     except Exception as e:
-        return f"Image generation error: {type(e).__name__} - {e}"
+        return f"Image generation error: {e}"
 
-# --- Command Logic Core ---
-
-async def process_chat_command(interaction_or_message, user_id, user_query, model, use_tutor, command_type, is_image_gen=False):
-    """Handles the core logic for chat/image commands, called by both prefix and slash commands."""
+async def process_command_logic(channel, user, message_content, attachments, model, use_tutor, command_type, user_query, is_image_gen):
+    """Shared logic for processing commands from both slash and prefix commands"""
+    print(f"[DEBUG] Processing command - Model: {model}, Type: {command_type}, Image: {is_image_gen}")
     
-    # 1. Rate Limit Check
-    can_proceed, rate_limit_msg = check_rate_limit(user_id, command_type)
+    # Check rate limits
+    can_proceed, rate_limit_msg = check_rate_limit(user.id, command_type)
     if not can_proceed:
-        if isinstance(interaction_or_message, discord.Interaction):
-            await interaction_or_message.response.send_message(f"⏱️ {rate_limit_msg}", ephemeral=True)
-        else:
-            await interaction_or_message.channel.send(f"⏱️ {rate_limit_msg}")
+        await channel.send(f"⏱️ {rate_limit_msg}")
         return
     
-    # 2. Acceptance Check (only for non-tutor, non-image models)
-    if not use_tutor and not is_image_gen and needs_acceptance(user_id):
-        async def process_after_acceptance():
-            await process_chat_command(interaction_or_message, user_id, user_query, model, use_tutor, command_type, is_image_gen)
-        
-        view = AcceptanceView(user_id, process_after_acceptance)
-        
+    # Check if non-teach model and needs acceptance
+    if not use_tutor and not is_image_gen and needs_acceptance(user.id):
         acceptance_embed = discord.Embed(
             title="⚠️ Non-Tutor Model - User Agreement",
             description=(
@@ -387,446 +422,429 @@ async def process_chat_command(interaction_or_message, user_id, user_query, mode
                 "1. Not use this to cheat on assignments or academic work\n"
                 "2. Not say extremely inappropriate or harmful content to it\n"
                 "3. Take responsibility if your usage causes any issues\n\n"
+                "If someone reports misuse, you agree to take full responsibility for your actions.\n\n"
                 "*This agreement is valid for 30 days.*"
             ),
             color=discord.Color.orange()
         )
         
-        if isinstance(interaction_or_message, discord.Interaction):
-            await interaction_or_message.response.send_message(embed=acceptance_embed, view=view, ephemeral=True)
-        else:
-            await interaction_or_message.channel.send(embed=acceptance_embed, view=view)
+        async def process_after_acceptance():
+            await execute_command(channel, user, attachments, model, use_tutor, command_type, user_query, is_image_gen)
+        
+        view = AcceptanceView(user.id, process_after_acceptance)
+        await channel.send(embed=acceptance_embed, view=view)
         return
-
-    # 3. Record Message & Process Attachments
-    record_message(user_id, command_type)
     
+    await execute_command(channel, user, attachments, model, use_tutor, command_type, user_query, is_image_gen)
+
+async def execute_command(channel, user, attachments, model, use_tutor, command_type, user_query, is_image_gen):
+    """Execute the actual command"""
+    record_message(user.id, command_type)
+    
+    # Handle attachments
     attachment_contents = []
-    attachments = []
-    
-    if isinstance(interaction_or_message, discord.Interaction) and interaction_or_message.message:
-        attachments = interaction_or_message.message.attachments
-    elif isinstance(interaction_or_message, discord.Message):
-        attachments = interaction_or_message.attachments
-
     if attachments and not is_image_gen:
         attachment_contents = await process_attachments(attachments)
     
     if not user_query and not attachment_contents:
-        response_text = "Please provide a message or attach a file after your command."
-        if isinstance(interaction_or_message, discord.Interaction):
-            await interaction_or_message.response.send_message(response_text, ephemeral=True)
-        else:
-            await interaction_or_message.channel.send(response_text)
+        await channel.send("Please provide a message or attach a file after your command.")
         return
     
     if not user_query:
         user_query = "Can you help me understand this?"
-        
-    # 4. Image Generation
+    
+    # Image generation
     if is_image_gen:
-        thinking_msg = await interaction_or_message.channel.send(f"🎨 Generating image... (using `{model}`)")
+        thinking_msg = await channel.send(f"🎨 Generating image... (using {model})")
         
-        response = await generate_image(user_query, model)
-        await thinking_msg.delete()
-        
-        if isinstance(response, str):
-            await interaction_or_message.channel.send(f"**Image Generation Failed:**\n{response}")
-        else:
-            # Poe image responses often contain text describing the image/process
-            content = response.content if hasattr(response, 'content') else ""
+        try:
+            response = await generate_image(user_query, model)
+            await thinking_msg.delete()
             
-            output_msg = f"🎨 **Image Generation Complete** (Model: `{model}`)\nPrompt: *{user_query}*"
-            if content:
-                output_msg += f"\n\n{content}"
-            
-            # NOTE: Direct image URL embedding from Poe API is complex/unreliable here.
-            # We rely on Poe's response text which *should* contain the image data/link if available.
-            await interaction_or_message.channel.send(output_msg)
+            if isinstance(response, str):
+                await channel.send(response)
+            else:
+                content = response.content if hasattr(response, 'content') else str(response)
+                
+                if content:
+                    await channel.send(f"**Prompt:** {user_query}\n\n{content}")
+                else:
+                    await channel.send(f"Image generated for: {user_query}")
+        except Exception as e:
+            await thinking_msg.delete()
+            await channel.send(f"Error generating image: {e}")
         return
     
-    # 5. Text Generation
+    # Text generation
     model_emoji = "🤖" if not use_tutor else "📚"
-    thinking_msg = await interaction_or_message.channel.send(f"{model_emoji} {'Mr. Tutor' if use_tutor else 'AI'} is thinking... (using `{model}`)")
+    thinking_msg = await channel.send(f"{model_emoji} {'Mr. Tutor' if use_tutor else 'AI'} is thinking... (using {model})")
     
-    reply = query_poe(user_id, user_query, attachment_contents, model=model, use_tutor_prompt=use_tutor)
+    reply = query_poe(user.id, user_query, attachment_contents, model=model, use_tutor_prompt=use_tutor)
     await thinking_msg.delete()
     
-    # Send response, chunking if necessary
     if len(reply) > 2000:
         chunks = [reply[i:i+2000] for i in range(0, len(reply), 2000)]
         for chunk in chunks:
-            await interaction_or_message.channel.send(chunk)
+            await channel.send(chunk)
     else:
-        await interaction_or_message.channel.send(reply)
-
-
-# --- Command Definitions (Slash & Prefix) ---
-
-# Command mapping for easy lookup: (model, use_tutor, command_type)
-COMMAND_MAP = {
-    # Tutor Models
-    "t": ("GPT-5-mini", True, "normal"),
-    "t_plus": ("Gemini-2.5-Flash-Tut", True, "plus"),
-    "t_minus": ("Gemini-2.5-Flash-Lite", True, "minus"),
-    # Image Models
-    "t_image": ("FLUX-schnell", False, "image"),
-    "t_image_plus": ("GPT-Image-1-Mini", False, "imageplus"),
-    # Non-Tutor Models
-    "tn": ("GPT-5-mini", False, "nonnormal"),
-    "tn_plus": ("Gemini-2.5-Flash-Tut", False, "nonplus"),
-    "tn_minus": ("Gemini-2.5-Flash-Lite", False, "nonminus"),
-}
-
-# --- Chat Commands ---
-
-class TutorGroup(app_commands.GroupCommand):
-    def __init__(self, name, description, model, use_tutor, command_type):
-        super().__init__(name=name, description=description)
-        self.model = model
-        self.use_tutor = use_tutor
-        self.command_type = command_type
-
-    async def callback(self, interaction: discord.Interaction, *, query: str = None):
-        await process_chat_command(interaction, interaction.user.id, query, self.model, self.use_tutor, self.command_type, is_image_gen=(self.command_type in ["image", "imageplus"]))
-
-# Create Slash Commands based on the map
-for cmd_name, (model, tutor, cmd_type) in COMMAND_MAP.items():
-    if cmd_type in ["normal", "plus", "minus", "nonnormal", "nonplus", "nonminus"]:
-        # Text Commands
-        description = f"Ask {model} (Tutor: {tutor})"
-        if cmd_type.startswith("non"):
-            description = f"Ask {model} (No Tutor Prompt)"
-        
-        # Register as a simple command for now, we'll group them later
-        @bot.hybrid_command(name=cmd_name, description=description)
-        async def command_func(interaction: discord.Interaction | discord.Message, query: str = None):
-            # This function is called by both $cmd and /cmd
-            user_id = interaction.user.id
-            
-            # Determine command type from the function name (which reflects the map key)
-            func_name = command_func.__name__
-            
-            # Map function name back to the original command type key
-            # This is a bit hacky but necessary for hybrid commands to know their configuration
-            # We need a better way to pass config, but for now, we rely on the command name.
-            
-            # Simple mapping for hybrid commands based on name:
-            if func_name == 't_func': model, tutor, cmd_type = COMMAND_MAP['t']
-            elif func_name == 't_plus_func': model, tutor, cmd_type = COMMAND_MAP['t_plus']
-            elif func_name == 't_minus_func': model, tutor, cmd_type = COMMAND_MAP['t_minus']
-            elif func_name == 'tn_func': model, tutor, cmd_type = COMMAND_MAP['tn']
-            elif func_name == 'tn_plus_func': model, tutor, cmd_type = COMMAND_MAP['tn_plus']
-            elif func_name == 'tn_minus_func': model, tutor, cmd_type = COMMAND_MAP['tn_minus']
-            elif func_name == 't_image_func': model, tutor, cmd_type = COMMAND_MAP['t_image']
-            elif func_name == 't_image_plus_func': model, tutor, cmd_type = COMMAND_MAP['t_image_plus']
-            else: return # Should not happen
-
-            await process_chat_command(interaction, user_id, query, model, tutor, cmd_type, is_image_gen=(cmd_type in ["image", "imageplus"]))
-        
-        # Rename the function dynamically to ensure it maps correctly to the map key for processing
-        # This is a common workaround for dynamically created hybrid commands
-        command_func.__name__ = f"{cmd_name}_func"
-        
-        # Re-assign the command to the bot object with the correct name
-        setattr(bot, cmd_name, command_func)
-
-
-# --- Utility Commands ---
-
-@bot.hybrid_command(name="clear", description="Clears your conversation history with the bot.")
-async def clear_history(interaction: discord.Interaction | discord.Message):
-    user_id = interaction.user.id
-    if user_id in conversation_history:
-        conversation_history[user_id].clear()
-        response = "Your conversation history has been cleared!"
-    else:
-        response = "You don't have any conversation history yet."
-    
-    if isinstance(interaction, discord.Interaction):
-        await interaction.response.send_message(response, ephemeral=True)
-    else:
-        await interaction.channel.send(response)
-
-@bot.hybrid_command(name="help", description="Shows all available commands.")
-async def help_cmd(interaction: discord.Interaction | discord.Message):
-    help_text = """**Mr. Tutor Bot Commands:**
-**📚 Teaching Models (Default: Tutor Prompt)**
-`/t` or `$t <message>` — Mr. Tutor (GPT-5-mini)
-`/t_plus` or `$t+ <message>` — Gemini-2.5-Flash-Tut (web search ON)
-`/t_minus` or `$t- <message>` — Gemini-2.5-Flash-Lite (cheap version)
-
-**🎨 Image Generation**
-`/t_image` or `$ti <prompt>` — Image generation (FLUX-schnell)
-`/t_image_plus` or `$ti+ <prompt>` — Image generation (GPT-Image-1-Mini)
-
-**🤖 Non-Teach Models (Requires Acceptance)**
-`/tn` or `$tn <message>` — GPT-5-mini (no tutor prompt)
-`/tn_plus` or `$tn+ <message>` — Gemini-2.5-Flash-Tut (no tutor prompt)
-`/tn_minus` or `$tn- <message>` — Gemini-2.5-Flash-Lite (no tutor prompt)
-
-**🛠️ Utility**
-`/clear` or `$clear` — Clear your conversation history
-`/help` or `$help` — Show this help
-
-**Admin Commands (Requires Admin Role/ID):**
-`/admin_set_limit <type> <name> <min> <10min> <hour>` — Set global/user rate limit
-`/admin_remove_limit <type> <name> [user]` — Remove a rate limit
-`/admin_toggle_bot <minutes>` — Disable bot (0 = infinite)
-`/admin_enable_bot` — Re-enable bot immediately
-
-**Note on Prefix Commands:** All commands above also work with the `$` prefix (e.g., `$t`, `$tn+`, `$clear`).
-"""
-    if isinstance(interaction, discord.Interaction):
-        await interaction.response.send_message(help_text, ephemeral=True)
-    else:
-        await interaction.channel.send(help_text)
-
-# --- Acceptance View (Re-defined for clarity) ---
-
-class AcceptanceView(View):
-    def __init__(self, user_id, callback):
-        super().__init__(timeout=300)  # 5 minute timeout
-        self.user_id = user_id
-        self.callback = callback
-    
-    @discord.ui.button(label="Accept & Continue", style=discord.ButtonStyle.green)
-    async def accept_button(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This prompt is not for you!", ephemeral=True)
-            return
-        
-        user_acceptances[str(self.user_id)] = datetime.now().timestamp()
-        save_user_acceptances()
-        
-        await interaction.response.send_message("✅ Terms accepted! Processing your request...", ephemeral=True)
-        await self.callback()
-        self.stop()
-    
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
-    async def cancel_button(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This prompt is not for you!", ephemeral=True)
-            return
-        
-        await interaction.response.send_message("Request cancelled.", ephemeral=True)
-        self.stop()
-
-# --- Admin Commands ---
-
-@bot.tree.command(name="admin_set_limit", description="[ADMIN] Set a global or user rate limit.")
-@app_commands.describe(
-    limit_type="Type: 'global' or 'user'",
-    name="Command type ('normal', 'plus', 'image', etc.) or @user mention",
-    per_min="Requests per minute",
-    per_10min="Requests per 10 minutes",
-    per_hour="Requests per hour",
-    duration_hours="For user limits only: how long the limit lasts (0 for permanent)"
-)
-async def admin_set_limit(interaction: discord.Interaction, limit_type: str, name: str, per_min: int, per_10min: int, per_hour: int, duration_hours: float = 0.0):
-    if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Access Denied: You are not an administrator.", ephemeral=True)
-        return
-    
-    limit_type = limit_type.lower()
-    
-    try:
-        if limit_type == "global":
-            if name not in [t[2] for t in COMMAND_MAP.values()]:
-                await interaction.response.send_message(f"❌ Invalid command type: `{name}`. Use one of: {', '.join(sorted(list(set([t[2] for t in COMMAND_MAP.values()]))))}", ephemeral=True)
-                return
-            
-            rate_limits["global"][name] = {
-                "per_minute": per_min, "per_10min": per_10min, "per_hour": per_hour
-            }
-            save_rate_limits()
-            await interaction.response.send_message(f"✅ Global rate limit set for `{name}`: {per_min}/min, {per_10min}/10min, {per_hour}/hour.")
-        
-        elif limit_type == "user":
-            if not interaction.message or not interaction.message.mentions:
-                await interaction.response.send_message("❌ For user limits, you must mention the user in the original prefix command that triggered this, or use a different structure for slash commands. For now, please mention the user in the command if possible or use a prefix command.", ephemeral=True)
-                return
-            
-            target_user = interaction.message.mentions[0] # This is unreliable for pure slash commands. Let's assume the user will use a prefix command for user limits for now, or we need to add a user argument to the slash command.
-            # ***FIX: For a pure slash command, we must add a user argument***
-            # Since I cannot easily modify the function signature above without breaking the prefix command mapping, 
-            # I will advise the user to use the prefix command for user limits or update the slash command structure.
-            # For now, I'll check if the command was triggered by a message that had a mention.
-            
-            # ***REVISING ADMIN SLICE FOR USER LIMITS***
-            # To support user limits cleanly in slash commands, we need to add a user parameter.
-            # I'll add a new slash command for user limits that takes a user.
-            await interaction.response.send_message("❌ User limit setting via this generic slash command is complex with prefix commands. Please use the dedicated `/admin_set_user_limit` command instead, or use the prefix command `$setuserlimit @user <cmd> <h> <m> <10m> <h>`.", ephemeral=True)
-        
-        else:
-            await interaction.response.send_message("❌ Invalid limit type. Use 'global' or 'user'.", ephemeral=True)
-
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Error setting limit: {e}", ephemeral=True)
-
-
-@bot.tree.command(name="admin_set_user_limit", description="[ADMIN] Set a user-specific rate limit.")
-@app_commands.describe(
-    target_user="The user to limit",
-    command_type="Command type ('normal', 'plus', 'image', etc.)",
-    per_min="Requests per minute",
-    per_10min="Requests per 10 minutes",
-    per_hour="Requests per hour",
-    duration_hours="How long the limit lasts (0 for permanent)"
-)
-async def admin_set_user_limit(interaction: discord.Interaction, target_user: discord.Member, command_type: str, per_min: int, per_10min: int, per_hour: int, duration_hours: float = 0.0):
-    if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Access Denied: You are not an administrator.", ephemeral=True)
-        return
-    
-    if command_type not in [t[2] for t in COMMAND_MAP.values()]:
-        await interaction.response.send_message(f"❌ Invalid command type: `{command_type}`. Use one of: {', '.join(sorted(list(set([t[2] for t in COMMAND_MAP.values()]))))}", ephemeral=True)
-        return
-
-    user_id_str = str(target_user.id)
-    if user_id_str not in rate_limits["users"]:
-        rate_limits["users"][user_id_str] = {}
-    
-    expires = None
-    if duration_hours > 0:
-        expires = (datetime.now() + timedelta(hours=duration_hours)).timestamp()
-    
-    rate_limits["users"][user_id_str][command_type] = {
-        "per_minute": per_min, "per_10min": per_10min, "per_hour": per_hour, "expires": expires
-    }
-    save_rate_limits()
-    
-    duration_text = f"{duration_hours} hours" if duration_hours > 0 else "permanently"
-    await interaction.response.send_message(f"✅ Rate limit set for {target_user.mention} on command type `{command_type}` for {duration_text}: {per_min}/min, {per_10min}/10min, {per_hour}/hour.")
-
-
-@bot.tree.command(name="admin_remove_limit", description="[ADMIN] Remove a global or user rate limit.")
-@app_commands.describe(
-    limit_type="Type: 'global' or 'user'",
-    name="Command type ('normal', 'plus', 'image', etc.)",
-    target_user="The user to remove the limit from (only needed if limit_type is 'user')"
-)
-async def admin_remove_limit(interaction: discord.Interaction, limit_type: str, name: str, target_user: discord.Member = None):
-    if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Access Denied: You are not an administrator.", ephemeral=True)
-        return
-
-    limit_type = limit_type.lower()
-    
-    if limit_type == "global":
-        if name in rate_limits["global"]:
-            del rate_limits["global"][name]
-            save_rate_limits()
-            await interaction.response.send_message(f"✅ Global rate limit removed for `{name}`")
-        else:
-            await interaction.response.send_message(f"❌ No global rate limit found for `{name}`")
-    
-    elif limit_type == "user":
-        if not target_user:
-            await interaction.response.send_message("❌ For user limits, you must specify the user to remove the limit from (e.g., `/admin_remove_limit user normal @User`).")
-            return
-        
-        user_id_str = str(target_user.id)
-        if user_id_str in rate_limits["users"] and name in rate_limits["users"][user_id_str]:
-            del rate_limits["users"][user_id_str][name]
-            save_rate_limits()
-            await interaction.response.send_message(f"✅ Rate limit removed for {target_user.mention} on command type `{name}`")
-        else:
-            await interaction.response.send_message(f"❌ No rate limit found for {target_user.mention} on command type `{name}`")
-    else:
-        await interaction.response.send_message("❌ Invalid limit type. Use 'global' or 'user'.")
-
-
-@bot.tree.command(name="admin_toggle_bot", description="[ADMIN] Disable the bot for a set duration.")
-@app_commands.describe(minutes="Duration in minutes to disable the bot (0 for infinite).")
-async def admin_toggle_bot(interaction: discord.Interaction, minutes: float):
-    if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Access Denied: You are not an administrator.", ephemeral=True)
-        return
-    
-    bot_state["enabled"] = False
-    
-    if minutes > 0:
-        bot_state["disable_until"] = (datetime.now() + timedelta(minutes=minutes)).timestamp()
-        await interaction.response.send_message(f"🔴 Bot disabled for {minutes} minutes. It will re-enable automatically.")
-    else:
-        bot_state["disable_until"] = None
-        await interaction.response.send_message("🔴 Bot disabled indefinitely until re-enabled via `/admin_enable_bot`.")
-    
-    save_bot_state()
-
-
-@bot.tree.command(name="admin_enable_bot", description="[ADMIN] Re-enable the bot immediately.")
-async def admin_enable_bot(interaction: discord.Interaction):
-    if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Access Denied: You are not an administrator.", ephemeral=True)
-        return
-    
-    bot_state["enabled"] = True
-    bot_state["disable_until"] = None
-    save_bot_state()
-    await interaction.response.send_message("🟢 Bot re-enabled!")
-
-
-# --- Bot Events ---
+        await channel.send(reply)
 
 @bot.event
 async def on_ready():
     load_persistent_data()
-    
-    # Sync app commands (Slash Commands)
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands.")
-    except Exception as e:
-        print(f"Failed to sync commands: {e}")
-        
-    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    print(f'✅ Logged in as {bot.user}')
+    print(f'✅ Bot is ready!')
     print(f'Admin User IDs: {ADMIN_IDS}')
     print(f'Admin Role Name: {ADMIN_ROLE_NAME}')
     print(f'⚠️  WARNING: File persistence will be lost on Railway restarts!')
-    print(f'⚠️  Consider using environment variables or a database for production.')
     
-    # Start background task to check bot state
+    # Sync slash commands
+    try:
+        synced = await bot.tree.sync()
+        print(f'✅ Synced {len(synced)} slash command(s)')
+    except Exception as e:
+        print(f'❌ Failed to sync commands: {e}')
+    
     bot.loop.create_task(check_bot_state_loop())
 
 async def check_bot_state_loop():
     """Background task to check if bot should be re-enabled"""
     while True:
         check_bot_state()
-        await asyncio.sleep(60)  # Check every minute
+        await asyncio.sleep(60)
 
+# Slash Commands
+@bot.tree.command(name="help", description="Show all available commands")
+async def slash_help(interaction: discord.Interaction):
+    help_text = """**Mr. Tutor Bot Commands:**
+
+**Text Commands ($ or /):**
+`/t <message>` or `$t <message>` — Mr. Tutor (GPT-5-mini)
+`/tplus <message>` or `$t+ <message>` — Gemini-2.5-Flash-Tut
+`/tminus <message>` or `$t- <message>` — Gemini-2.5-Flash-Lite
+`/tn <message>` or `$tn <message>` — GPT-5-mini (no tutor)
+`/tnplus <message>` or `$tn+ <message>` — Gemini (no tutor)
+`/tnminus <message>` or `$tn- <message>` — Gemini Lite (no tutor)
+
+**Image Commands ($ or /):**
+`/ti <prompt>` or `$ti <prompt>` — FLUX-schnell
+`/tiplus <prompt>` or `$ti+ <prompt>` — GPT-Image-1-Mini
+
+**Utility:**
+`/clear` or `$clear` — Clear your conversation history
+
+**Admin Access:** User ID or "{ADMIN_ROLE_NAME}" role
+"""
+    await interaction.response.send_message(help_text, ephemeral=True)
+
+@bot.tree.command(name="t", description="Ask Mr. Tutor (GPT-5-mini)")
+async def slash_t(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+    await process_command_logic(interaction.channel, interaction.user, message, [], 
+                                "GPT-5-mini", True, "normal", message, False)
+
+@bot.tree.command(name="tplus", description="Ask Mr. Tutor (Gemini-2.5-Flash-Tut)")
+async def slash_tplus(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+    await process_command_logic(interaction.channel, interaction.user, message, [], 
+                                "Gemini-2.5-Flash-Tut", True, "plus", message, False)
+
+@bot.tree.command(name="tminus", description="Ask Mr. Tutor (Gemini-2.5-Flash-Lite)")
+async def slash_tminus(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+    await process_command_logic(interaction.channel, interaction.user, message, [], 
+                                "Gemini-2.5-Flash-Lite", True, "minus", message, False)
+
+@bot.tree.command(name="tn", description="Ask GPT-5-mini (no tutor prompt)")
+async def slash_tn(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+    await process_command_logic(interaction.channel, interaction.user, message, [], 
+                                "GPT-5-mini", False, "nonnormal", message, False)
+
+@bot.tree.command(name="tnplus", description="Ask Gemini-2.5-Flash (no tutor prompt)")
+async def slash_tnplus(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+    await process_command_logic(interaction.channel, interaction.user, message, [], 
+                                "Gemini-2.5-Flash-Tut", False, "nonplus", message, False)
+
+@bot.tree.command(name="tnminus", description="Ask Gemini-2.5-Flash-Lite (no tutor prompt)")
+async def slash_tnminus(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+    await process_command_logic(interaction.channel, interaction.user, message, [], 
+                                "Gemini-2.5-Flash-Lite", False, "nonminus", message, False)
+
+@bot.tree.command(name="ti", description="Generate image with FLUX-schnell")
+async def slash_ti(interaction: discord.Interaction, prompt: str):
+    await interaction.response.defer()
+    await process_command_logic(interaction.channel, interaction.user, prompt, [], 
+                                "FLUX-schnell", False, "image", prompt, True)
+
+@bot.tree.command(name="tiplus", description="Generate image with GPT-Image-1-Mini")
+async def slash_tiplus(interaction: discord.Interaction, prompt: str):
+    await interaction.response.defer()
+    await process_command_logic(interaction.channel, interaction.user, prompt, [], 
+                                "GPT-Image-1-Mini", False, "imageplus", prompt, True)
+
+@bot.tree.command(name="clear", description="Clear your conversation history")
+async def slash_clear(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    if user_id in conversation_history:
+        conversation_history[user_id].clear()
+        await interaction.response.send_message("✅ Your conversation history has been cleared!", ephemeral=True)
+    else:
+        await interaction.response.send_message("You don't have any conversation history yet.", ephemeral=True)
+
+# Prefix Commands ($ commands)
 @bot.event
 async def on_message(message):
-    # Process commands first (handles both $prefix and /slash via hybrid_command)
-    await bot.process_commands(message)
-    
     if message.author == bot.user:
         return
     
-    # Check bot state before processing any further commands
+    # Check bot state
     if not check_bot_state():
         if not is_admin(message.author.id, message.author):
-            return # Ignore non-admin messages when disabled
-
-    # --- Manual Prefix Command Handling (for commands *not* converted to hybrid/slash) ---
-    # Since we converted ALL chat commands to hybrid commands above, this section is simplified.
-    # We only need to handle the logic for non-command messages or if a user uses a command
-    # that wasn't properly converted (which shouldn't happen with the loop above).
+            return
     
-    # The main issue with your old code was the manual parsing. By using hybrid commands,
-    # the framework handles the dispatch to the correct function based on the prefix ($)
-    # or the slash invocation (/).
+    # Handle $ prefix commands
+    content_lower = message.content.lower()
     
-    # If a message starts with '$' but doesn't match a defined command, we do nothing here,
-    # as the bot.process_commands() handles known prefixes.
-    pass
+    # Help
+    if content_lower.startswith("$help"):
+        help_text = """**Mr. Tutor Bot Commands:**
 
-# --- Run Bot ---
+**Text Commands ($ or /):**
+`/t <message>` or `$t <message>` — Mr. Tutor (GPT-5-mini)
+`/tplus <message>` or `$t+ <message>` — Gemini-2.5-Flash-Tut
+`/tminus <message>` or `$t- <message>` — Gemini-2.5-Flash-Lite
+`/tn <message>` or `$tn <message>` — GPT-5-mini (no tutor)
+`/tnplus <message>` or `$tn+ <message>` — Gemini (no tutor)
+`/tnminus <message>` or `$tn- <message>` — Gemini Lite (no tutor)
+
+**Image Commands ($ or /):**
+`/ti <prompt>` or `$ti <prompt>` — FLUX-schnell
+`/tiplus <prompt>` or `$ti+ <prompt>` — GPT-Image-1-Mini
+
+**Utility:**
+`/clear` or `$clear` — Clear conversation history
+
+**Admin Commands ($ only):**
+`$setgloballimit <cmd> <per_min> <per_10min> <per_hour>`
+`$setuserlimit <@user> <cmd> <hours> <per_min> <per_10min> <per_hour>`
+`$removelimit global <cmd>` or `$removelimit user <@user> <cmd>`
+`$togglebot <minutes>` — Disable bot
+`$enablebot` — Re-enable bot
+
+**Admin Access:** User ID or "{ADMIN_ROLE_NAME}" role
+"""
+        await message.channel.send(help_text)
+        return
+    
+    # Clear
+    if content_lower.startswith("$clear"):
+        user_id = message.author.id
+        if user_id in conversation_history:
+            conversation_history[user_id].clear()
+            await message.channel.send("✅ Your conversation history has been cleared!")
+        else:
+            await message.channel.send("You don't have any conversation history yet.")
+        return
+    
+    # Admin commands
+    if is_admin(message.author.id, message.author):
+        if content_lower.startswith("$setgloballimit"):
+            parts = message.content.split()
+            if len(parts) < 5:
+                await message.channel.send("❌ Usage: `$setgloballimit <command> <per_min> <per_10min> <per_hour>`")
+                return
+            
+            command = parts[1]
+            try:
+                per_min = int(parts[2])
+                per_10min = int(parts[3])
+                per_hour = int(parts[4])
+            except ValueError:
+                await message.channel.send("❌ Invalid numbers for rate limits.")
+                return
+            
+            rate_limits["global"][command] = {
+                "per_minute": per_min,
+                "per_10min": per_10min,
+                "per_hour": per_hour
+            }
+            save_rate_limits()
+            print(f"[ADMIN] Global rate limit set for {command}: {per_min}/min, {per_10min}/10min, {per_hour}/hour")
+            await message.channel.send(f"✅ **Global rate limit set for `{command}`**\n📊 Limits: {per_min}/min, {per_10min}/10min, {per_hour}/hour")
+            return
+        
+        if content_lower.startswith("$setuserlimit"):
+            parts = message.content.split()
+            if len(parts) < 7:
+                await message.channel.send("❌ Usage: `$setuserlimit <@user> <command> <duration_hours> <per_min> <per_10min> <per_hour>`")
+                return
+            
+            if not message.mentions:
+                await message.channel.send("❌ Please mention a user.")
+                return
+            
+            target_user = message.mentions[0]
+            command = parts[2]
+            
+            try:
+                duration_hours = float(parts[3])
+                per_min = int(parts[4])
+                per_10min = int(parts[5])
+                per_hour = int(parts[6])
+            except ValueError:
+                await message.channel.send("❌ Invalid numbers for rate limits or duration.")
+                return
+            
+            user_id_str = str(target_user.id)
+            if user_id_str not in rate_limits["users"]:
+                rate_limits["users"][user_id_str] = {}
+            
+            expires = None
+            if duration_hours > 0:
+                expires = (datetime.now() + timedelta(hours=duration_hours)).timestamp()
+            
+            rate_limits["users"][user_id_str][command] = {
+                "per_minute": per_min,
+                "per_10min": per_10min,
+                "per_hour": per_hour,
+                "expires": expires
+            }
+            save_rate_limits()
+            
+            duration_text = f"{duration_hours} hours" if duration_hours > 0 else "permanently"
+            print(f"[ADMIN] User rate limit set for {target_user.name} on {command}")
+            await message.channel.send(f"✅ **Rate limit set for {target_user.mention}**\n📝 Command: `{command}`\n⏱️ Duration: {duration_text}\n📊 Limits: {per_min}/min, {per_10min}/10min, {per_hour}/hour")
+            return
+        
+        if content_lower.startswith("$removelimit"):
+            parts = message.content.split()
+            if len(parts) < 3:
+                await message.channel.send("❌ Usage: `$removelimit global <command>` or `$removelimit user <@user> <command>`")
+                return
+            
+            limit_type = parts[1].lower()
+            
+            if limit_type == "global":
+                command = parts[2]
+                if command in rate_limits["global"]:
+                    del rate_limits["global"][command]
+                    save_rate_limits()
+                    print(f"[ADMIN] Global rate limit removed for {command}")
+                    await message.channel.send(f"✅ Global rate limit removed for `{command}`")
+                else:
+                    await message.channel.send(f"❌ No global rate limit found for `{command}`")
+                return
+            
+            elif limit_type == "user":
+                if not message.mentions:
+                    await message.channel.send("❌ Please mention a user.")
+                    return
+                
+                target_user = message.mentions[0]
+                command = parts[3]
+                user_id_str = str(target_user.id)
+                
+                if user_id_str in rate_limits["users"] and command in rate_limits["users"][user_id_str]:
+                    del rate_limits["users"][user_id_str][command]
+                    save_rate_limits()
+                    print(f"[ADMIN] User rate limit removed for {target_user.name} on {command}")
+                    await message.channel.send(f"✅ Rate limit removed for {target_user.mention} on `{command}`")
+                else:
+                    await message.channel.send(f"❌ No rate limit found for {target_user.mention} on `{command}`")
+                return
+        
+        if content_lower.startswith("$togglebot"):
+            parts = message.content.split()
+            if len(parts) < 2:
+                await message.channel.send("❌ Usage: `$togglebot <minutes>` (0 for infinite)")
+                return
+            
+            try:
+                minutes = float(parts[1])
+            except ValueError:
+                await message.channel.send("❌ Invalid number for minutes.")
+                return
+            
+            bot_state["enabled"] = False
+            
+            if minutes > 0:
+                bot_state["disable_until"] = (datetime.now() + timedelta(minutes=minutes)).timestamp()
+                print(f"[ADMIN] Bot disabled for {minutes} minutes")
+                await message.channel.send(f"🔴 **Bot disabled for {minutes} minutes.**")
+            else:
+                bot_state["disable_until"] = None
+                print(f"[ADMIN] Bot disabled indefinitely")
+                await message.channel.send("🔴 **Bot disabled indefinitely until re-enabled.**")
+            
+            save_bot_state()
+            return
+        
+        if content_lower.startswith("$enablebot"):
+            bot_state["enabled"] = True
+            bot_state["disable_until"] = None
+            save_bot_state()
+            print(f"[ADMIN] Bot re-enabled")
+            await message.channel.send("🟢 **Bot re-enabled!**")
+            return
+    
+    # Parse regular commands - CHECK LONGER PREFIXES FIRST
+    command = None
+    model = None
+    use_tutor = True
+    command_type = None
+    user_query = None
+    is_image_gen = False
+    
+    # Check for $ prefix commands
+    if message.content.startswith("$"):
+        for prefix, m, tutor, cmd_type in COMMAND_CONFIGS:
+            prefix_with_dollar = f"${prefix} "
+            prefix_with_dollar_no_space = f"${prefix}"
+            
+            # Check with space or at end of message
+            if (content_lower.startswith(prefix_with_dollar) or 
+                (content_lower == prefix_with_dollar_no_space)):
+                command = prefix
+                model = m
+                use_tutor = tutor
+                command_type = cmd_type
+                is_image_gen = cmd_type in ["image", "imageplus"]
+                user_query = message.content[len(prefix_with_dollar_no_space):].strip()
+                print(f"[DEBUG] Matched ${prefix} -> model: {model}, type: {cmd_type}")
+                break
+    
+    # Check for @ mentions
+    if command is None and bot.user in message.mentions:
+        prefix_str = f'<@{bot.user.id}>'
+        clean_content = message.content.replace(prefix_str, '').strip()
+        
+        for prefix, m, tutor, cmd_type in COMMAND_CONFIGS:
+            if clean_content.lower().startswith(f"{prefix} ") or clean_content.lower() == prefix:
+                command = prefix
+                model = m
+                use_tutor = tutor
+                command_type = cmd_type
+                is_image_gen = cmd_type in ["image", "imageplus"]
+                user_query = clean_content[len(prefix):].strip()
+                print(f"[DEBUG] Matched mention {prefix} -> model: {model}, type: {cmd_type}")
+                break
+        
+        # Default to t if just mentioned
+        if command is None:
+            command = "t"
+            model = "GPT-5-mini"
+            use_tutor = True
+            command_type = "normal"
+            user_query = clean_content
+            print(f"[DEBUG] Defaulted to 't' for mention")
+    
+    if command:
+        await process_command_logic(message.channel, message.author, message.content, 
+                                    message.attachments, model, use_tutor, command_type, 
+                                    user_query, is_image_gen)
 
 if __name__ == "__main__":
-    load_persistent_data()
-    if not DISCORD_BOT_TOKEN:
-        print("FATAL: DISCORD_BOT_TOKEN environment variable not set.")
-    else:
-        bot.run(DISCORD_BOT_TOKEN)
+    bot.run(DISCORD_BOT_TOKEN)
