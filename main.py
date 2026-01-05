@@ -1,3 +1,4 @@
+
 import os
 from keep_alive import start as start_keep_alive
 
@@ -53,69 +54,69 @@ user_messages = defaultdict(lambda: defaultdict(list))
 user_acceptances = {}
 
 custom_prompt = """# Mr. Tutor – Core Guidelines
-  
+    
 You are in a roleplay as **"Mr. Tutor"**!
 Your role is to act like a proper teacher who helps learners with questions and problems.
 You **never reveal the final answer directly**. Instead, you guide, question, and encourage the learner to discover the solution themselves.
-  
+    
 ---
-  
+    
 ## Teaching Philosophy
 - Act as a mentor, not a solver.
 - Encourage curiosity and independent thinking.
 - Provide hints, scaffolding, and structured steps.
 - Celebrate progress, not just correctness.
-  
+    
 ---
-  
+    
 ## Core Guidelines
 1. **Never give the final answer outright.**
    - Instead, break the problem into smaller steps.
    - Offer hints, analogies, or guiding questions.
-  
+    
 2. **Encourage active participation.**
    - Ask the learner what they think the next step could be.
    - Validate their reasoning and gently correct if needed.
-  
+    
 3. **Use the Socratic method.**
    - Lead with questions that spark deeper thought.
    - Example: "What happens if we try to simplify this part first?"
-  
+    
 4. **Provide structure.**
    - Outline clear steps or strategies without completing them.
    - Example: "Step 1 is to identify the variables. Step 2 is to check the relationship. What do you notice?"
-  
+    
 5. **Adapt to the learner's level.**
    - Use simple language for beginners.
    - Add complexity for advanced learners.
-  
+    
 6. **Encourage reflection.**
    - Ask learners to explain their reasoning.
    - Reinforce understanding by connecting concepts.
-  
+    
 7. **Promote confidence.**
    - Highlight what the learner did correctly.
    - Frame mistakes as opportunities to learn.
-  
+    
 ---
-  
+    
 ## Example Behaviors
 - Don't: "The answer is 42."
 - Do: "What happens if you divide both sides by 7? What number do you get?"
-  
+    
 - Don't: "Here's the full solution."
 - Do: "Let's start with the first step. Can you identify the key variable here?"
-  
+    
 ---
-  
+    
 ## Goal
 By following these guidelines, Mr. Tutor ensures that learners:
 - Develop problem-solving skills.
 - Gain confidence in their own reasoning.
 - Learn how to learn, not just how to answer.
-  
+    
 ---
-  """
+"""
 
 poe_client = openai.OpenAI(
     api_key=POE_API_KEY,
@@ -132,7 +133,7 @@ COMMAND_CONFIGS = [
     ("standardminus", "Gemini-2.5-Flash-Lite", False, "nonminus"),
     ("tutor", "tester-kimi-k2-non", True, "normal"),
     ("image", "FLUX-schnell", False, "image"),
-    ("standard", "GPT-5-mini", False, "nonnormal"),
+    ("standard", "tester-kimi-k2-non", False, "nonnormal"),
     # Keep old $ shortcuts for backwards compatibility
     ("tut+", "Gemini-2.5-Flash-Tut", True, "plus"),
     ("tut-", "Gemini-2.5-Flash-Lite", True, "minus"),
@@ -284,17 +285,20 @@ class AcceptanceView(View):
         save_user_acceptances()
         self.accepted = True
 
-        await interaction.response.send_message("✅ Terms accepted! Processing your request...", ephemeral=True)
+        await interaction.response.send_message("✅ Terms accepted! Processing your request...", 
+                                                ephemeral=True)
         await self.callback()
         self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
     async def cancel_button(self, interaction: discord.Interaction, button: Button):
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This prompt is not for you!", ephemeral=True)
+            await interaction.response.send_message("This prompt is not for you!", 
+                                                    ephemeral=True)
             return
 
-        await interaction.response.send_message("Request cancelled.", ephemeral=True)
+        await interaction.response.send_message("Request cancelled.", 
+                                                ephemeral=True)
         self.stop()
 
 async def download_attachment(attachment):
@@ -351,7 +355,7 @@ async def process_attachments(attachments):
             })
     return attachment_contents
 
-def query_poe(user_id, user_prompt, attachment_contents=None, model="GPT-5-mini", use_tutor_prompt=True):
+def query_poe(user_id, user_prompt, attachment_contents=None, model="tester-kimi-k2-non", use_tutor_prompt=True):
     try:
         # Use appropriate conversation history
         conversation_history = tutor_conversation_history if use_tutor_prompt else standard_conversation_history
@@ -558,34 +562,34 @@ async def slash_help(interaction: discord.Interaction):
     help_text = """**Mr. Tutor Bot Commands:**
 
 **Tutor Commands (with teaching prompts):**
-`/tutor <message>` — GPT-5-mini (Mr. Tutor)
-`/tutorplus <message>` — Gemini-2.5-Flash-Tut (Mr. Tutor)
-`/tutorminus <message>` — Gemini-2.5-Flash-Lite (Mr. Tutor)
+/tutor <message> — Kimi-K2-Instruct (Mr. Tutor)
+/tutorplus <message> — Gemini-3-Flash (Mr. Tutor)
+/tutorminus <message> — Gemini-2.5-Flash-Lite (Mr. Tutor)
 
 **Standard Commands (no teaching prompts):**
-`/standard <message>` — GPT-5-mini (no tutor)
-`/standardplus <message>` — Gemini-2.5-Flash-Tut (no tutor)
-`/standardminus <message>` — Gemini-2.5-Flash-Lite (no tutor)
+/standard <message> — Kimi-K2-Instruct (no tutor)
+/standardplus <message> — Gemini-3-Flash (no tutor)
+/standardminus <message> — Gemini-2.5-Flash-Lite (no tutor)
 
 **Image Commands:**
-`/image <prompt>` — FLUX-schnell
-`/imageplus <prompt>` — GPT-Image-1-Mini (low quality)
+/image <prompt> — FLUX-schnell
+/imageplus <prompt> — GPT-Image-1-Mini (low quality)
 
 **Utility:**
-`/clear` — Clear your conversation history (separate for tutor/standard)
+/clear — Clear your conversation history (separate for tutor/standard)
 
 **Old $ shortcuts still work:** $t, $t+, $t-, $ti, $ti+, $tn, $tn+, $tn-
 """
     await interaction.response.send_message(help_text, ephemeral=True)
 
-@bot.tree.command(name="tutor", description="Ask Mr. Tutor (GPT-5-mini)")
+@bot.tree.command(name="tutor", description="Ask Mr. Tutor (Kimi-K2-Instruct)")
 async def slash_tutor(interaction: discord.Interaction, message: str):
     await interaction.response.defer()
     thinking_msg = await interaction.followup.send("📚 Mr. Tutor is thinking...")
     await process_command_logic(interaction.channel, interaction.user, message, [],
-                                "GPT-5-mini", True, "normal", message, False, thinking_msg)
+                                "tester-kimi-k2-non", True, "normal", message, False, thinking_msg)
 
-@bot.tree.command(name="tutorplus", description="Ask Mr. Tutor (Gemini-2.5-Flash-Tut)")
+@bot.tree.command(name="tutorplus", description="Ask Mr. Tutor (Gemini-3-Flash)")
 async def slash_tutorplus(interaction: discord.Interaction, message: str):
     await interaction.response.defer()
     thinking_msg = await interaction.followup.send("📚 Mr. Tutor is thinking...")
@@ -599,14 +603,14 @@ async def slash_tutorminus(interaction: discord.Interaction, message: str):
     await process_command_logic(interaction.channel, interaction.user, message, [],
                                 "Gemini-2.5-Flash-Lite", True, "minus", message, False, thinking_msg)
 
-@bot.tree.command(name="standard", description="Ask GPT-5-mini (no tutor prompt)")
+@bot.tree.command(name="standard", description="Ask Kimi-K2-Instruct (no tutor prompt)")
 async def slash_standard(interaction: discord.Interaction, message: str):
     await interaction.response.defer()
     thinking_msg = await interaction.followup.send("🤖 AI is thinking...")
     await process_command_logic(interaction.channel, interaction.user, message, [],
-                                "GPT-5-mini", False, "nonnormal", message, False, thinking_msg)
+                                "tester-kimi-k2-non", False, "nonnormal", message, False, thinking_msg)
 
-@bot.tree.command(name="standardplus", description="Ask Gemini-2.5-Flash (no tutor prompt)")
+@bot.tree.command(name="standardplus", description="Ask Gemini-3-Flash (no tutor prompt)")
 async def slash_standardplus(interaction: discord.Interaction, message: str):
     await interaction.response.defer()
     thinking_msg = await interaction.followup.send("🤖 AI is thinking...")
@@ -658,13 +662,15 @@ async def slash_clear(interaction: discord.Interaction):
             msg += " (Standard history)"
         await interaction.response.send_message(msg, ephemeral=True)
     else:
-        await interaction.response.send_message("You don't have any conversation history yet.", ephemeral=True)
+        await interaction.response.send_message("You don't have any conversation history yet.", 
+                                               ephemeral=True)
 
 # Admin Slash Commands
 @bot.tree.command(name="setgloballimit", description="[ADMIN] Set global rate limit for a command")
 async def slash_setgloballimit(interaction: discord.Interaction, command: str, per_min: int, per_10min: int, per_hour: int):
     if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", 
+                                                ephemeral=True)
         return
     
     rate_limits["global"][command] = {
@@ -679,7 +685,8 @@ async def slash_setgloballimit(interaction: discord.Interaction, command: str, p
 @bot.tree.command(name="setuserlimit", description="[ADMIN] Set rate limit for a specific user")
 async def slash_setuserlimit(interaction: discord.Interaction, user: discord.User, command: str, duration_hours: float, per_min: int, per_10min: int, per_hour: int):
     if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", 
+                                                ephemeral=True)
         return
     
     user_id_str = str(user.id)
@@ -705,7 +712,8 @@ async def slash_setuserlimit(interaction: discord.Interaction, user: discord.Use
 @bot.tree.command(name="removegloballimit", description="[ADMIN] Remove global rate limit for a command")
 async def slash_removegloballimit(interaction: discord.Interaction, command: str):
     if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", 
+                                                ephemeral=True)
         return
     
     if command in rate_limits["global"]:
@@ -719,7 +727,8 @@ async def slash_removegloballimit(interaction: discord.Interaction, command: str
 @bot.tree.command(name="removeuserlimit", description="[ADMIN] Remove rate limit for a specific user")
 async def slash_removeuserlimit(interaction: discord.Interaction, user: discord.User, command: str):
     if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", 
+                                                ephemeral=True)
         return
     
     user_id_str = str(user.id)
@@ -735,7 +744,8 @@ async def slash_removeuserlimit(interaction: discord.Interaction, user: discord.
 @bot.tree.command(name="togglebot", description="[ADMIN] Disable bot for specified minutes (0 = infinite)")
 async def slash_togglebot(interaction: discord.Interaction, minutes: float):
     if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", 
+                                                ephemeral=True)
         return
     
     bot_state["enabled"] = False
@@ -754,7 +764,8 @@ async def slash_togglebot(interaction: discord.Interaction, minutes: float):
 @bot.tree.command(name="enablebot", description="[ADMIN] Re-enable the bot")
 async def slash_enablebot(interaction: discord.Interaction):
     if not is_admin(interaction.user.id, interaction.user):
-        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ Sorry, but you need admin permissions to use this command.", 
+                                                ephemeral=True)
         return
     
     bot_state["enabled"] = True
@@ -782,27 +793,8 @@ async def on_message(message):
         help_text = """**Mr. Tutor Bot Commands:**
 
 **Tutor Commands (with teaching prompts):**
-`/tutor <message>` or `$tutor <message>` — GPT-5-mini (Mr. Tutor)
-`/tutorplus <message>` or `$tutorplus <message>` — Gemini-2.5-Flash-Tut
-`/tutorminus <message>` or `$tutorminus <message>` — Gemini-2.5-Flash-Lite
-
-**Standard Commands (no teaching prompts):**
-`/standard <message>` or `$standard <message>` — GPT-5-mini
-`/standardplus <message>` or `$standardplus <message>` — Gemini-2.5-Flash-Tut
-`/standardminus <message>` or `$standardminus <message>` — Gemini-2.5-Flash-Lite
-
-**Image Commands:**
-`/image <prompt>` or `$image <prompt>` — FLUX-schnell
-`/imageplus <prompt>` or `$imageplus <prompt>` — GPT-Image-1-Mini (low)
-
-**Utility:**
-`/clear` or `$clear` — Clear conversation history
-
-**Old shortcuts:** $t, $t+, $t-, $ti, $ti+, $tn, $tn+, $tn-
-
-**Admin Commands:**
-Use slash commands: /setgloballimit, /setuserlimit, /removegloballimit, /removeuserlimit, /togglebot, /enablebot
-Or old $ versions: $setgloballimit, $setuserlimit, $removelimit, $togglebot, $enablebot
+/tutor <message> or $tutor <message> — Kimi-K2-Instruct (Mr. Tutor)
+...
 """
         await message.channel.send(help_text)
         return
@@ -1020,7 +1012,7 @@ Or old $ versions: $setgloballimit, $setuserlimit, $removelimit, $togglebot, $en
         # Default to tutor if just mentioned
         if command is None:
             command = "tutor"
-            model = "GPT-5-mini"
+            model = "tester-kimi-k2-non"
             use_tutor = True
             command_type = "normal"
             user_query = clean_content
