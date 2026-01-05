@@ -130,21 +130,21 @@ COMMAND_CONFIGS = [
     ("imageplus", "GPT-Image-1-Mini", False, "imageplus"),
     ("standardplus", "Gemini-2.5-Flash-Tut", False, "nonplus"),
     ("standardminus", "Gemini-2.5-Flash-Lite", False, "nonminus"),
-    ("tutor", "GPT-5-mini", True, "normal"),
+    ("tutor", "tester-kimi-k2-non", True, "normal"),
     ("image", "FLUX-schnell", False, "image"),
     ("standard", "GPT-5-mini", False, "nonnormal"),
     # Keep old $ shortcuts for backwards compatibility
     ("tut+", "Gemini-2.5-Flash-Tut", True, "plus"),
     ("tut-", "Gemini-2.5-Flash-Lite", True, "minus"),
-    ("tut", "GPT-5-mini", True, "normal"),
+    ("tut", "tester-kimi-k2-non", True, "normal"),
     ("ti+", "GPT-Image-1-Mini", False, "imageplus"),
     ("ti", "FLUX-schnell", False, "image"),
     ("tn+", "Gemini-2.5-Flash-Tut", False, "nonplus"),
     ("tn-", "Gemini-2.5-Flash-Lite", False, "nonminus"),
-    ("tn", "GPT-5-mini", False, "nonnormal"),
+    ("tn", "tester-kimi-k2-non", False, "nonnormal"),
     ("t+", "Gemini-2.5-Flash-Tut", True, "plus"),
     ("t-", "Gemini-2.5-Flash-Lite", True, "minus"),
-    ("t", "GPT-5-mini", True, "normal"),
+    ("t", "tester-kimi-k2-non", True, "normal"),
 ]
 
 # Helper functions
